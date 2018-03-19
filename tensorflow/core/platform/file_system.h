@@ -105,6 +105,12 @@ class FileSystem {
   /// Returns OK if the named path exists and NOT_FOUND otherwise.
   virtual Status FileExists(const string& fname) = 0;
 
+  /// Returns true if all the listed files exist, false otherwise.
+  /// if status is not null, populate the vector with a detailed status
+  /// for each file.
+  virtual bool FilesExist(const std::vector<string>& files,
+                          std::vector<Status>* status);
+
   /// \brief Returns the immediate children in the given directory.
   ///
   /// The returned paths are relative to 'dir'.
@@ -183,6 +189,9 @@ class FileSystem {
   /// \brief Overwrites the target if it exists.
   virtual Status RenameFile(const string& src, const string& target) = 0;
 
+  /// \brief Copy the src to target.
+  virtual Status CopyFile(const string& src, const string& target);
+
   /// \brief Translate an URI to a filename for the FileSystem implementation.
   ///
   /// The implementation in this class cleans up the path, removing
@@ -199,6 +208,9 @@ class FileSystem {
   ///  * PERMISSION_DENIED - Insufficient permissions.
   ///  * UNIMPLEMENTED - The file factory doesn't support directories.
   virtual Status IsDirectory(const string& fname);
+
+  /// \brief Flushes any cached filesystem objects from memory.
+  virtual void FlushCaches();
 
   FileSystem() {}
 

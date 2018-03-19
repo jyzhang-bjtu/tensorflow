@@ -16,22 +16,6 @@ py_test(
     srcs_version = "PY2AND3",
     deps = [
         ":k8s_tensorflow_lib",
-        "//tensorflow/python:client_testlib",
-    ],
-)
-
-py_library(
-    name = "kubectl_util_lib",
-    srcs = ["kubectl_util.py"],
-    srcs_version = "PY2AND3",
-)
-
-py_test(
-    name = "kubectl_util_test",
-    srcs = ["kubectl_util_test.py"],
-    srcs_version = "PY2AND3",
-    deps = [
-        ":kubectl_util_lib",
-        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:platform_test",
     ],
 )

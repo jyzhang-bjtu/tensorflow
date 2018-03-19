@@ -30,7 +30,7 @@ typedef Eigen::GpuDevice GPUDevice;
 
 #ifdef TENSORFLOW_USE_SYCL
 typedef Eigen::SyclDevice SYCLDevice;
-#endif // TENSORFLOW_USE_SYCL
+#endif  // TENSORFLOW_USE_SYCL
 
 template <typename Device, typename T>
 class SelectOp : public OpKernel {
@@ -45,9 +45,9 @@ class SelectOp : public OpKernel {
     OP_REQUIRES_OK(ctx, ctx->input("t", &then));
     OP_REQUIRES_OK(ctx, ctx->input("e", &else_));
 
-    if (TensorShapeUtils::IsScalar(cond->shape())){
-        ComputeScalar(ctx, cond, then, else_);
-        return;
+    if (TensorShapeUtils::IsScalar(cond->shape())) {
+      ComputeScalar(ctx, cond, then, else_);
+      return;
     }
 
     bool broadcasting = (TensorShapeUtils::IsVector(cond->shape()) &&
@@ -69,13 +69,15 @@ class SelectOp : public OpKernel {
         errors::InvalidArgument("'cond' must be a vector, but saw shape: ",
                                 cond->shape().DebugString()));
     OP_REQUIRES(
-        ctx, FastBoundsCheck(cond->NumElements(),
-                             std::numeric_limits<Eigen::DenseIndex>::max()),
+        ctx,
+        FastBoundsCheck(cond->NumElements(),
+                        std::numeric_limits<Eigen::DenseIndex>::max()),
         errors::InvalidArgument("cond vector larger than ",
                                 std::numeric_limits<Eigen::DenseIndex>::max()));
     OP_REQUIRES(
-        ctx, FastBoundsCheck(then->flat_outer_dims<T>().dimension(1),
-                             std::numeric_limits<Eigen::DenseIndex>::max()),
+        ctx,
+        FastBoundsCheck(then->flat_outer_dims<T>().dimension(1),
+                        std::numeric_limits<Eigen::DenseIndex>::max()),
         errors::InvalidArgument("flat outer dims dim 1 size >= ",
                                 std::numeric_limits<Eigen::DenseIndex>::max()));
 
@@ -96,10 +98,8 @@ class SelectOp : public OpKernel {
             else_->shape().DebugString()));
 
     Tensor* output = nullptr;
-    if (!ctx->forward_input_to_output("t", "output", &output).ok() &&
-        !ctx->forward_input_to_output("e", "output", &output).ok()) {
-      OP_REQUIRES_OK(ctx, ctx->allocate_output(0, then->shape(), &output));
-    }
+    OP_REQUIRES_OK(ctx, ctx->forward_input_or_allocate_output(
+                            {"t", "e"}, "output", then->shape(), &output));
     if (output->NumElements() > 0) {
       functor::BatchSelectFunctor<Device, T> func;
       func(ctx->eigen_device<Device>(), output->flat_outer_dims<T>(),
@@ -112,10 +112,8 @@ class SelectOp : public OpKernel {
                           const Tensor* then, const Tensor* else_) {
     if (!ctx->ValidateInputsAreSameShape(this)) return;
     Tensor* output = nullptr;
-    if (!ctx->forward_input_to_output("t", "output", &output).ok() &&
-        !ctx->forward_input_to_output("e", "output", &output).ok()) {
-      OP_REQUIRES_OK(ctx, ctx->allocate_output(0, then->shape(), &output));
-    }
+    OP_REQUIRES_OK(ctx, ctx->forward_input_or_allocate_output(
+                            {"t", "e"}, "output", then->shape(), &output));
     if (output->NumElements() > 0) {
       functor::SelectFunctor<Device, T> func;
       func(ctx->eigen_device<Device>(), output->flat<T>(), cond->flat<bool>(),
@@ -124,7 +122,7 @@ class SelectOp : public OpKernel {
   }
 
   void ComputeScalar(OpKernelContext* ctx, const Tensor* cond,
-                          const Tensor* then, const Tensor* else_) {
+                     const Tensor* then, const Tensor* else_) {
     OP_REQUIRES(
         ctx, then->shape().IsSameSize(else_->shape()),
         errors::InvalidArgument(
@@ -133,10 +131,8 @@ class SelectOp : public OpKernel {
             else_->shape().DebugString()));
 
     Tensor* output = nullptr;
-    if (!ctx->forward_input_to_output("t", "output", &output).ok() &&
-        !ctx->forward_input_to_output("e", "output", &output).ok()) {
-      OP_REQUIRES_OK(ctx, ctx->allocate_output(0, then->shape(), &output));
-    }
+    OP_REQUIRES_OK(ctx, ctx->forward_input_or_allocate_output(
+                            {"t", "e"}, "output", then->shape(), &output));
 
     if (output->NumElements() > 0) {
       functor::SelectScalarFunctor<Device, T> func;
@@ -145,6 +141,7 @@ class SelectOp : public OpKernel {
            then->flat<T>(), else_->flat<T>());
     }
   }
+
  private:
   TF_DISALLOW_COPY_AND_ASSIGN(SelectOp);
 };
@@ -184,9 +181,11 @@ REGISTER_SELECT_GPU(complex128);
       SelectOp<SYCLDevice, type>);
 
 REGISTER_SELECT_SYCL(float);
+REGISTER_SELECT_SYCL(double);
 REGISTER_SELECT_SYCL(int32);
+REGISTER_SELECT_SYCL(int64);
 #undef REGISTER_SELECT_SYCL
-#endif // TENSORFLOW_USE_SYCL
+#endif  // TENSORFLOW_USE_SYCL
 
 namespace functor {
 
@@ -202,13 +201,11 @@ struct SelectFunctorBase {
 };
 
 template <typename T>
-struct SelectFunctor<CPUDevice, T>
-        : SelectFunctorBase<CPUDevice, T> {};
+struct SelectFunctor<CPUDevice, T> : SelectFunctorBase<CPUDevice, T> {};
 #ifdef TENSORFLOW_USE_SYCL
 template <typename T>
-struct SelectFunctor<SYCLDevice, T>
-        : SelectFunctorBase<SYCLDevice, T> {};
-#endif // TENSORFLOW_USE_SYCL
+struct SelectFunctor<SYCLDevice, T> : SelectFunctorBase<SYCLDevice, T> {};
+#endif  // TENSORFLOW_USE_SYCL
 
 template <typename Device, typename T>
 struct SelectScalarFunctorBase {
@@ -223,12 +220,12 @@ struct SelectScalarFunctorBase {
 // CPU Specializations of Select functors with scalar
 template <typename T>
 struct SelectScalarFunctor<CPUDevice, T>
-        : SelectScalarFunctorBase<CPUDevice, T> {};
+    : SelectScalarFunctorBase<CPUDevice, T> {};
 #ifdef TENSORFLOW_USE_SYCL
 template <typename T>
 struct SelectScalarFunctor<SYCLDevice, T>
-        : SelectScalarFunctorBase<SYCLDevice, T> {};
-#endif // TENSORFLOW_USE_SYCL
+    : SelectScalarFunctorBase<SYCLDevice, T> {};
+#endif  // TENSORFLOW_USE_SYCL
 
 template <typename Device, typename T>
 struct BatchSelectFunctorBase {
@@ -241,8 +238,8 @@ struct BatchSelectFunctorBase {
     const Eigen::DenseIndex all_but_batch = then_flat_outer_dims.dimension(1);
 
 #if !defined(EIGEN_HAS_INDEX_LIST)
-    Eigen::array<Eigen::DenseIndex, 2> broadcast_dims{{ 1, all_but_batch }};
-    Eigen::Tensor<Eigen::DenseIndex, 2>::Dimensions reshape_dims{{ batch, 1 }};
+    Eigen::array<Eigen::DenseIndex, 2> broadcast_dims{{1, all_but_batch}};
+    Eigen::Tensor<Eigen::DenseIndex, 2>::Dimensions reshape_dims{{batch, 1}};
 #else
     Eigen::IndexList<Eigen::type2index<1>, Eigen::DenseIndex> broadcast_dims;
     broadcast_dims.set(1, all_but_batch);
@@ -258,13 +255,13 @@ struct BatchSelectFunctorBase {
 };
 
 template <typename T>
-struct BatchSelectFunctor<CPUDevice, T>
-        : BatchSelectFunctorBase<CPUDevice, T> {};
+struct BatchSelectFunctor<CPUDevice, T> : BatchSelectFunctorBase<CPUDevice, T> {
+};
 #ifdef TENSORFLOW_USE_SYCL
 template <typename T>
 struct BatchSelectFunctor<SYCLDevice, T>
-        : BatchSelectFunctorBase<SYCLDevice, T> {};
-#endif // TENSORFLOW_USE_SYCL
+    : BatchSelectFunctorBase<SYCLDevice, T> {};
+#endif  // TENSORFLOW_USE_SYCL
 
 }  // namespace functor
 

@@ -20,8 +20,8 @@ from __future__ import print_function
 
 import itertools
 
-from tensorflow.contrib.distributions.python.ops.bijectors import bijector
 from tensorflow.python.framework import constant_op
+from tensorflow.python.ops.distributions import bijector
 
 
 __all__ = [
@@ -81,6 +81,13 @@ class Chain(bijector.Bijector):
     if bijectors is None:
       bijectors = ()
     self._bijectors = bijectors
+
+    for a_bijector in bijectors:
+      if not a_bijector._is_injective:  # pylint: disable=protected-access
+        raise NotImplementedError(
+            "Invert is not implemented for non-injective bijector ({})".format(
+                a_bijector.name))
+
     dtype = list(set([b.dtype for b in bijectors]))
     if len(dtype) > 2:
       raise ValueError("incompatible dtypes: %s" % dtype)

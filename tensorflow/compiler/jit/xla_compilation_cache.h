@@ -31,6 +31,7 @@ namespace tensorflow {
 
 // Struct that represents a possibly-absent Tensor.
 struct OptionalTensor {
+  string name;           // A descriptive name
   bool present = false;  // Is the tensor present?
   Tensor value;          // If present, what is the Tensor's value?
 };
@@ -45,7 +46,7 @@ struct OptionalTensor {
 // bound.
 class XlaCompilationCache : public ResourceBase {
  public:
-  explicit XlaCompilationCache(const XlaCompiler::Options& options);
+  XlaCompilationCache(xla::LocalClient* client, DeviceType device_type);
   ~XlaCompilationCache() override;
 
   // Compiles a function into a XlaCompiler::CompilationResult that can be used
@@ -60,19 +61,28 @@ class XlaCompilationCache : public ResourceBase {
   // xla::LocalExecutable and sets `executable to point to it. The resulting
   // executable pointer may be null if the computation has no non-constant
   // outputs.
-  Status Compile(const NameAttrList& function, int num_constant_args,
-                 const std::vector<OptionalTensor>& variable_args,
+  Status Compile(const XlaCompiler::Options& options,
+                 const NameAttrList& function, int num_constant_args,
+                 const std::map<int, OptionalTensor>& variable_args,
                  OpKernelContext* ctx,
                  const XlaCompiler::CompilationResult** compilation_result,
-                 xla::LocalExecutable** executable);
+                 xla::LocalExecutable** executable,
+                 const XlaCompiler::CompileOptions* compile_options);
 
-  xla::Client* client() const { return compiler_.client(); }
+  xla::LocalClient* client() const { return client_; }
+  const DeviceType& device_type() const { return device_type_; }
 
   string DebugString() override;
 
  private:
-  XlaCompiler compiler_;
-  std::unique_ptr<FunctionLibraryRuntime> function_library_runtime_;
+  // Takes `result` which has been compiled from a Tensorflow subgraph to a
+  // XLA computation already, and generates an XLA LocalExecutable `executable`.
+  Status BuildExecutable(const XlaCompiler::Options& options,
+                         const XlaCompiler::CompilationResult& result,
+                         std::unique_ptr<xla::LocalExecutable>* executable);
+
+  xla::LocalClient* const client_;
+  const DeviceType device_type_;
 
   // Describes the types, shapes and any compile-time constant arguments
   // to a kernel. Key that uniquely identifies a compilation output.
@@ -95,7 +105,7 @@ class XlaCompilationCache : public ResourceBase {
 
   // Builds the signature for a compilation.
   Status BuildSignature(const NameAttrList& function, int num_constant_args,
-                        const std::vector<OptionalTensor>& variable_args,
+                        const std::map<int, OptionalTensor>& variable_args,
                         OpKernelContext* ctx, Signature* signature);
 
   // The value associated with a cache entry.

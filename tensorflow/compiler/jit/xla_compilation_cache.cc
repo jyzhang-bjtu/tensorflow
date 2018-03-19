@@ -37,9 +37,9 @@ limitations under the License.
 
 namespace tensorflow {
 
-XlaCompilationCache::XlaCompilationCache(const XlaCompiler::Options& options)
-    : compiler_(options) {}
-
+XlaCompilationCache::XlaCompilationCache(xla::LocalClient* client,
+                                         DeviceType device_type)
+    : client_(client), device_type_(std::move(device_type)) {}
 XlaCompilationCache::~XlaCompilationCache() = default;
 
 string XlaCompilationCache::DebugString() {
@@ -93,9 +93,9 @@ uint64 XlaCompilationCache::Signature::Hash::operator()(
 
 Status XlaCompilationCache::BuildSignature(
     const NameAttrList& function, int num_constant_args,
-    const std::vector<OptionalTensor>& variable_args, OpKernelContext* ctx,
+    const std::map<int, OptionalTensor>& variable_args, OpKernelContext* ctx,
     Signature* signature) {
-  signature->name = Canonicalize(function.name(), function.attr());
+  signature->name = Canonicalize(function.name(), AttrSlice(&function.attr()));
   signature->arg_values.resize(num_constant_args);
 
   signature->arg_types.reserve(ctx->num_inputs() - num_constant_args);
@@ -115,7 +115,8 @@ Status XlaCompilationCache::BuildSignature(
   }
   // For variable signatures, use the type and shape of the variable's
   // current value.
-  for (const OptionalTensor& variable : variable_args) {
+  for (auto& iterator : variable_args) {
+    const OptionalTensor& variable = iterator.second;
     TF_RET_CHECK(input_num < ctx->num_inputs());
     if (variable.present) {
       signature->arg_types.emplace_back(variable.value.dtype(),
@@ -133,7 +134,7 @@ namespace {
 // Builds a XlaCompiler::Argument vector from the arguments to the _XlaLaunch
 // op. The first `num_constant_args` arguments must be host-memory Tensors.
 Status BuildArguments(int num_constant_args,
-                      const std::vector<OptionalTensor>& variable_args,
+                      const std::map<int, OptionalTensor>& variable_args,
                       OpKernelContext* ctx,
                       std::vector<XlaCompiler::Argument>* args) {
   args->resize(ctx->num_inputs());
@@ -175,23 +176,26 @@ Status BuildArguments(int num_constant_args,
 
   // Handles resource variables.
   TF_RET_CHECK(input_num + num_variable_args == ctx->num_inputs());
-  for (int variable_id = 0; variable_id < num_variable_args; ++variable_id) {
+  for (auto& iterator : variable_args) {
     const Tensor& input = ctx->input(input_num);
     TF_RET_CHECK(input.dtype() == DT_RESOURCE);
 
     XlaCompiler::Argument& arg = (*args)[input_num];
 
-    if (variable_args[variable_id].present) {
-      const Tensor& value = variable_args[variable_id].value;
-      arg.kind = XlaCompiler::Argument::kVariable;
+    arg.name = iterator.second.name;
+    arg.kind = XlaCompiler::Argument::kResource;
+    arg.resource_kind = XlaResource::kVariable;
+    if (iterator.second.present) {
+      const Tensor& value = iterator.second.value;
       arg.type = value.dtype();
       arg.shape = value.shape();
+      arg.initialized = true;
     } else {
       // The values of uninitialized variables are not passed as inputs, since
       // they are meaningless. However, it is legal to assign to a resource
       // variable for the first time inside the XLA computation, so we do permit
       // uninitialized variables.
-      arg.kind = XlaCompiler::Argument::kUninitializedVariable;
+      arg.initialized = false;
       arg.type = DT_INVALID;
       arg.shape = TensorShape();
     }
@@ -203,11 +207,38 @@ Status BuildArguments(int num_constant_args,
 
 }  // namespace
 
+Status XlaCompilationCache::BuildExecutable(
+    const XlaCompiler::Options& options,
+    const XlaCompiler::CompilationResult& result,
+    std::unique_ptr<xla::LocalExecutable>* executable) {
+  VLOG(2) << "Compiling to local executable";
+
+  std::vector<const xla::Shape*> argument_layouts(
+      result.xla_input_shapes.size());
+  for (int i = 0; i < result.xla_input_shapes.size(); ++i) {
+    argument_layouts[i] = &result.xla_input_shapes[i];
+  }
+  xla::ExecutableBuildOptions build_options;
+  build_options.set_device_ordinal(client_->default_device_ordinal());
+  build_options.set_result_layout(result.xla_output_shape);
+  build_options.set_device_allocator(options.device_allocator);
+
+  auto compile_result =
+      client_->Compile(*result.computation, argument_layouts, build_options);
+  if (!compile_result.ok()) {
+    return compile_result.status();
+  }
+  *executable = std::move(compile_result.ValueOrDie());
+  return Status::OK();
+}
+
 Status XlaCompilationCache::Compile(
-    const NameAttrList& function, int num_constant_args,
-    const std::vector<OptionalTensor>& variable_args, OpKernelContext* ctx,
+    const XlaCompiler::Options& options, const NameAttrList& function,
+    int num_constant_args, const std::map<int, OptionalTensor>& variable_args,
+    OpKernelContext* ctx,
     const XlaCompiler::CompilationResult** compilation_result,
-    xla::LocalExecutable** executable) {
+    xla::LocalExecutable** executable,
+    const XlaCompiler::CompileOptions* compile_options) {
   VLOG(1) << "XlaCompilationCache::Compile " << DebugString();
 
   if (VLOG_IS_ON(2)) {
@@ -220,10 +251,12 @@ Status XlaCompilationCache::Compile(
               << " present=" << ctx->has_input(i)
               << " shape=" << shape.DebugString();
     }
-    for (const OptionalTensor& variable : variable_args) {
+    for (auto& iterator : variable_args) {
+      const OptionalTensor& variable = iterator.second;
       VLOG(2) << "variable present=" << variable.present
               << " type=" << DataTypeString(variable.value.dtype())
-              << " shape=" << variable.value.shape().DebugString();
+              << " shape=" << variable.value.shape().DebugString()
+              << " TF arg= " << iterator.first;
     }
     VLOG(2) << "num_outputs = " << ctx->num_outputs();
     for (int i = 0; i < ctx->num_outputs(); i++) {
@@ -256,28 +289,25 @@ Status XlaCompilationCache::Compile(
   // cache eviction.
   mutex_lock entry_lock(entry->mu);
   if (!entry->compiled) {
+    VLOG(1) << "Compilation cache miss for signature: "
+            << SignatureDebugString(signature);
     // Do the actual JIT compilation without holding the lock (it can take
     // a long time.)
     std::vector<XlaCompiler::Argument> args;
     TF_RETURN_IF_ERROR(
         BuildArguments(num_constant_args, variable_args, ctx, &args));
 
-    std::unique_ptr<FunctionLibraryRuntime> flr(NewFunctionLibraryRuntime(
-        compiler_.device_mgr(), ctx->env(), compiler_.device(),
-        TF_GRAPH_DEF_VERSION,
-        ctx->function_library()->GetFunctionLibraryDefinition(),
-        OptimizerOptions(), nullptr /* custom_kernel_creator */));
-
+    XlaCompiler compiler(options);
     entry->compiled = true;
-    entry->compilation_status = compiler_.CompileFunction(
-        flr.get(), function, args, &entry->compilation_result);
+    entry->compilation_status = compiler.CompileFunction(
+        compile_options ? *compile_options : XlaCompiler::CompileOptions(),
+        function, args, &entry->compilation_result);
   }
   *compilation_result = &entry->compilation_result;
   if (entry->compilation_status.ok() && executable) {
-    if (entry->executable == nullptr &&
-        !entry->compilation_result.computation.IsNull()) {
-      entry->compilation_status = compiler_.BuildExecutable(
-          entry->compilation_result, &entry->executable);
+    if (entry->executable == nullptr) {
+      entry->compilation_status = BuildExecutable(
+          options, entry->compilation_result, &entry->executable);
     }
     *executable = entry->executable.get();
   }
